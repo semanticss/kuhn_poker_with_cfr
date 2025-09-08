@@ -1,142 +1,240 @@
-use rand::prelude::*;
+use rand::rng;
+use rand::seq::SliceRandom;
+use std::collections::HashMap;
 extern crate rand;
 
 // remember rand_distr and statrs
+
 #[derive(Clone, Copy, Debug)]
-enum Action {Pass, Bet, Fold}
+enum Act {Pass, Bet, Call, Fold}
 
-#[derive(Default)]
-struct Player {
-    id: u8,
-    card: u8,
-    active: bool,
+
+#[derive(Clone)]
+struct Node {
+    regret_sum: [f64; 2], // two actions at one node
+    strategy_sum: [f64; 2],
+    n_actions: usize,
 }
 
-#[derive(Default)]
+impl Node {
+    fn new(n_actions: usize) -> Self {
+        Node {
+            regret_sum: [0.0; 2],
+            strategy_sum: [0.0; 2],
+            n_actions,
+        }
+    }
+
+    fn get_strategy(&self) -> [f64; 2] {
+        // regret match
+        let r0 = self.regret_sum[0].max(0.0);
+        let r1 = self.regret_sum[1].max(0.0);
+        let sum = r0 + r1;
+
+        if sum > 0.0 {
+            [r0 / sum, r1 / sum]
+        } else { // just flip a coin otherwise
+            [0.5, 0.5]
+        }
+    }
+
+    fn accumulate_strategy(&mut self, strategy: [f64; 2], reach_probability: f64) {
+        self.strategy_sum[0] += reach_probability * strategy[0]; // weighting with chance of reaching the state
+        self.strategy_sum[1] += reach_probability * strategy[1];
+    }
+
+    fn average_strategy(&self) -> [f64; 2] {
+        let sum = self.strategy_sum[0] + self.strategy_sum[1];
+        if sum > 0.0 {
+            [self.strategy_sum[0] / sum, self.strategy_sum[1] / sum]
+        } else {
+            [0.5, 0.5]
+        }
+    }
+}
+
+#[derive(Clone)]
 struct GameState {
-    player: usize,
-    hole_cards: [i32; 2],
-    pot: u8,
-    history: Vec<u32>,
-    is_terminal: bool,
-    players: [Player; 2],
+    player: usize, // represents the players perspective that it is from
+    cards: [u8; 2],
+    history: String,
 }
 
-#[derive(Default)]
-struct InfoSet {
-    regrets: Vec<i32>,
-    strategy_sum: Vec<i32>,
-}
-
-fn history_maker(action: Action, player: &Player) -> u8 {
-
-    let action_integer = match action {
-        Action::Pass => 0,
-        Action::Bet => 1,
-        Action::Fold => 2,
-    }
-    
-    let bet: u8 = if matches!(action, Action::Bet) {1} else {0}; // if action == Action::Bet, then make bet 1, otherwise make it 0
-
-    (action_integer << 1) | (player.id & 0b1)
-}
-
-fn history_reader(history: &u8) -> (Action, u8) {
-    let action_integer = (history >> 1) & 0b11
-
-    let action = match action_integer {
-        0 => Action::Pass,
-        1 => Action:: Bet,
-        2 => Action::Fold,
-    }
-    
-    let player_id = history & 0b1;
-
-    (action, player_id)
-}
-
-
-fn evaluate_terminal_payout(state: &GameState) -> { // a tuple with player who won and how much they won?
-    if !state.is_terminal {
-        println("Evaluating payout at non-terminal game state")
-        break
+impl GameState {
+    fn new(cards: [u8; 2]) -> Self {
+        Self {
+            cards,
+            history: String::new(),
+            player: 0, // !!
+        }
     }
 
-    // only interested in last two histories, so call the second to last history in the hand the "first history" and the last action the "last history"
-    let pot = state.pot;
-    let mut last_history = state.history[state.history.len() - 1];
-    let mut first_history = state.history[state.history.len() - 2];
+    fn is_terminal(&self) -> bool {
+        matches!(
+            self.history.as_str(),
+            "pp" | "bc" | "bf" | "pbc" | "pbf"
+        )
+    }
 
-    let last_actor = history_reader(last_action)[1]; // id of the player, not the position state.players, but i dont see how they could ever be different but idk
-    let first_actor = history_reader(first_history)[1];
+    fn utility_p0(&self) -> f64 {
+        let p0 = self.cards[0];
+        let p1 = self.cards[1];
+        let higher_p0 = (p0 > p1) as i32; // true -> 1, false -> 0, casting boolean as i32 i guess
+        let higher_p1 = (p1 > p0) as i32;
 
-    let last_action = history_reader(last_history)[0];
-    let first_action = history_reader(first_history)[0];
-
-    match (first_action, last_action) {
-        // Bet Fold
-        first_action == Action::Bet && last_action == Action:Fold => (first_actor, pot),
-
-        // Bet Bet
-
-        first_action == Action::Bet && last_action == Action::Bet => {
-            // card eval logic
+        match self.history.as_str() {
+            "pp" => {
+                if higher_p0 == 1 { 1.0 } else { -1.0 }
+            }
+            "bc" => {
+                if higher_p0 == 1 { 2.0 } else { -2.0 }
+            }
+            "pbc" => {
+                if higher_p0 == 1 { 2.0 } else { -2.0 }
+            }
+            "bf" => {
+                1.0
+            }
+            "pbf" => {
+                -1.0
+            }
+            _ => 0.0,
+            }
         }
 
-        // Check Check
-
-        first_action == Action::Pass && last_action == Action::Pass {
-            // card eval logic
+        fn legal_actions(&self) -> [Act; 2] {
+        match self.history.as_str() {
+            "" => [Act::Pass, Act::Bet], // p0 can check or bet
+            "p" => [Act::Pass, Act::Bet], // P1 can check or bet
+            "b" => [Act::Call, Act::Fold], // p1 can call or fold
+            "pb" => [Act::Call, Act::Fold], // p0 can call or fold
+            _ => [Act::Pass, Act::Pass], // won't be used at terminal
+            }
         }
 
+    fn next(&self, a: Act) -> Self {
+        let mut s = self.clone();
+        match (s.history.as_str(), a) {
+            ("", Act::Pass) => { s.history.push('p'); s.player = 1; }
+            ("", Act::Bet)  => { s.history.push('b'); s.player = 1; }
+
+            ("p", Act::Pass) => { s.history.push('p');}
+            ("p", Act::Bet)  => { s.history.push('b'); s.player = 0; }
+
+            ("b", Act::Call) => { s.history.push('c');}
+            ("b", Act::Fold) => { s.history.push('f');}
+
+            ("pb", Act::Call) => { s.history.push('c');}
+            ("pb", Act::Fold) => { s.history.push('f');}
+
+            _ => {}
+            }
+        s
+        }
+    }
+
+struct Trainer {
+    //             infokey  node
+    //               ↓       ↓
+    nodes: HashMap<String, Node>
+}
+
+impl Trainer {
+    fn new() -> Self {
+        Self {nodes: HashMap::new()}
+    }
+
+    fn info_key(state: &GameState) -> String {
+        let card = state.cards[state.player]; // how to know which player we are talking about?
+        format!("{} | {}", card, state.history)
+    }
+
+    fn get_or_make_node(&mut self, key: &str, n_actions: usize) -> &mut Node {
+        self.nodes.entry(key.to_string()).or_insert_with(|| Node::new(n_actions)) // gets entry from key or makes a new node with that key
+    }
+
+    //                                   reach probabilities
+    //                                         ↓      ↓
+    fn cfr(&mut self, state: &GameState, p0: f64, p1: f64) -> f64 {
+        // basically this runs until we reach a terminal state
+        if state.is_terminal() {
+            return state.utility_p0();
+        }
+
+        let player = state.player;
+        let key = Self::info_key(state);
+        let actions = state.legal_actions();
+
+        let n_actions = match actions {
+            [Act::Pass, Act::Bet] | [Act::Call, Act::Fold] => 2, // always 2 in kuhn poker
+            _ => 2,
+        };
+
+        let strategy = self.get_or_make_node(&key, 2).get_strategy();
+        let reach = if player == 0 {p0} else {p1};
+
+        let mut child_util_p0 = [0.0_f64; 2];
+
+        for (i, a) in [actions[0], actions[1]].iter().enumerate() {
+            let next_state = state.next(*a);
+            let (np0, np1) = if player == 0 {
+                (p0 * strategy[i], p1)
+            } else {
+                (p0, p1 * strategy[i])
+            };
+            child_util_p0[i] = self.cfr(&next_state, np0, np1);
+        }
+
+        let mut action_val_cur = child_util_p0;
+
+        if player == 1 {
+        action_val_cur[0] = -action_val_cur[0];
+        action_val_cur[1] = -action_val_cur[1];
+    }
+
+    let node_util_cur = strategy[0] * action_val_cur[0] + strategy[1] * action_val_cur[1];
+
+
+        {
+        let node = self.get_or_make_node(&key, 2);
+        for i in 0..2 {
+            let regret = action_val_cur[i] - node_util_cur;
+            if player == 0 { node.regret_sum[i] += regret * p1; }
+            else           { node.regret_sum[i] += regret * p0; }
+        }
+
+        node.accumulate_strategy(strategy, reach);
+
+        }
+
+        if player == 0 {node_util_cur} else {-node_util_cur}
+
+
+    }
+
+    fn train(&mut self, iters: usize) {
+        let mut rng = rng();
+        let mut deck = [0_u8, 1, 2];
+        
+        for _ in 0..iters {
+            deck.shuffle(&mut rng);
+            let state = GameState::new([deck[0], deck[1]]);
+            self.cfr(&state, 1.0, 1.0);
+        }
     }
 
 }
-
-fn take_action(state: &GameState, action: u8, player: &Player) { // 0 = pass, 1 = bet, 2 = fold
-    let mut new_state = state.clone();
-
-    match action {
-        0 => {
-            new_state.history.push(history_maker(0), player)
-        }, 
-        1 => {
-            new_state.pot += 1;
-            new_state.history.push(history_maker(1))
-        }, 
-        2 => {
-            new_state.active_players[player.id] = False;
-            new_state.is_terminal = True
-            new_state.history.push(history_maker(2))
-        }, 
-        _ => (),
-    }
-    
-}
-
-fn deal(player1: &mut Player, player2: &mut Player) {
-    let mut deck = vec![0,1,2];
-    let mut rng = rand::rng();
-
-    deck.shuffle(&mut rng);
-
-    player1.card = deck[0];
-    player2.card = deck[1];
-}
-
-
-
-
-fn play_game(optional_state: Optional<&GameState>) {
-    let state = optional_state.unwrap_or(GameState {
-        active_players: [true, true],
-        .. Default::default() });
-
-    
-    
-}
-
 
 fn main() {
 
+    let mut trainer = Trainer::new();
+    trainer.train(10_000_000);
+
+    let mut keys: Vec<_> = trainer.nodes.keys().cloned().collect();
+    keys.sort();
+    for k in keys {
+        let node = trainer.nodes.get(&k).unwrap();
+        let avg = node.average_strategy();
+        println!("{:<6} -> [{:.3}, {:.3}]", k, avg[0], avg[1]);
+    }
 }
