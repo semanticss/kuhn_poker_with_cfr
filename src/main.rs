@@ -335,11 +335,12 @@ fn print_table(info_sets: &HashMap<String, InfoSetData>, order: &[String]) {
 }
 
 fn main() {
+    use std::fs::File;
+    use std::io::Write;
+
     let mut info_sets: HashMap<String, InfoSetData> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
     init_infosets(&mut info_sets, &mut order);
-
-
 
     let num_iterations: usize = 300_000;
     let num_gains_to_plot = 100usize;
@@ -349,6 +350,7 @@ fn main() {
     }
 
     let mut tot_gains: Vec<f64> = Vec::new();
+    let mut series: Vec<(usize, f64)> = Vec::new(); // (iteration, tot_gain)
 
     for i in 0..num_iterations {
         update_beliefs(&mut info_sets, &order);
@@ -359,13 +361,22 @@ fn main() {
 
         calc_infoset_likelihoods(&mut info_sets, &order);
         let tot_gain = calc_gains(&mut info_sets, &order);
+
         if i % gain_grp_size == 0 {
             tot_gains.push(tot_gain);
-            println!("TOT_GAIN {:.3}", tot_gain);
+            series.push((i, tot_gain));
         }
+
         update_strategy(&mut info_sets, &order);
     }
 
     print_table(&info_sets, &order);
 
+    // Write CSV for plotting elsewhere
+    let mut f = File::create("tot_gain.csv").expect("create tot_gain.csv");
+    writeln!(f, "iter,tot_gain").unwrap();
+    for (i, g) in series {
+        writeln!(f, "{},{}", i, g).unwrap();
+    }
+    println!("wrote tot_gain.csv");
 }
